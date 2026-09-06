@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Task 4 writes its sliding-window state to an on-disk SQLite file
+*.db
+*.db-wal
+*.db-shm
