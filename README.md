@@ -170,12 +170,12 @@ Servers, if you want to poke at them by hand:
 ## Test results
 
 ```
-task-1-mcp-server             68 passed
+task-1-mcp-server             85 passed
 task-2-mcp-gateway            93 passed
 task-3-streaming-guardrail   131 passed
 task-4-model-router           67 passed
                             ─────────────
-                             359 passed in 28.71s
+                             376 passed in 33.37s
 ```
 
 Verified on Python 3.12.3 (Windows). `mcp` is pinned to `>=1.17,<2.0`: the 2.x line

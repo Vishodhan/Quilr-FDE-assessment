@@ -7,7 +7,7 @@ schemas and standard JSON-RPC error codes.
 |------|---------|
 | `models.py` | Strict Pydantic input/output schemas; the source of truth for the advertised JSON Schemas. |
 | `server.py` | Tool implementations, JSON-RPC handlers, stdio isolation, entrypoint. |
-| `test_server.py` | 68 tests across validation depth, stdio isolation and protocol compliance. |
+| `test_server.py` | 85 tests across validation depth, refund arithmetic, stdio isolation and protocol compliance. |
 
 ---
 
@@ -47,7 +47,7 @@ To attach it to an MCP client (Claude Desktop, MCP Inspector, etc.):
 | Field | Rule |
 |-------|------|
 | `customer_id` | string matching `^CUST-[A-Z0-9]{5}$` |
-| `amount` | number, `> 0`, finite (NaN/Infinity rejected) |
+| `amount` | number, `> 0`, finite (NaN/Infinity rejected), at most 2 decimal places |
 | `reason` | string, 10–500 characters, not whitespace-only |
 
 Both schemas set `additionalProperties: false`, so an unknown argument is an error
@@ -87,10 +87,10 @@ This is the split the MCP spec asks for, and the server honours it:
 
 | Situation | Response |
 |-----------|----------|
-| Malformed arguments (bad ID, negative amount, short reason, extra field) | JSON-RPC `-32602 Invalid params` |
+| Malformed arguments (bad ID, negative or sub-cent amount, short reason, extra field) | JSON-RPC `-32602 Invalid params` |
 | Unknown tool name | JSON-RPC `-32602 Invalid params` (matches the official TS SDK) |
 | Customer does not exist | `CallToolResult(isError=true)` |
-| Refund exceeds refundable balance | `CallToolResult(isError=true)` |
+| Refund exceeds refundable balance, or rounds to zero cents | `CallToolResult(isError=true)` |
 | Unexpected server fault | JSON-RPC `-32603 Internal error`, message sanitised |
 
 A model calling the tool can *react* to "no such customer"; it cannot react to "your
@@ -115,17 +115,22 @@ enforce validation, so the published contract cannot drift from the enforcement.
 | Criterion | Where it is proven |
 |-----------|--------------------|
 | **STDIO isolation** — no stray writes on the protocol channel | `TestStdioIsolation` (4 tests): every stdout line parses as JSON-RPC 2.0; `print()`/`sys.stdout.write()` are shown landing on stderr; logs confirmed on stderr. |
-| **Protocol compliance** — correct JSON-RPC error mapping and flow | `TestProtocolCompliance` (12 tests) drives a real subprocess through initialize → initialized → tools/list → 9 tool calls and asserts the code on each reply. Plus `test_official_client_can_drive_the_server`, which runs the real SDK `ClientSession` end to end. |
-| **Validation depth** — schemas that hold up on every field | `TestValidationDepth` (51 tests): casing, length, separators, whitespace-padding, newline injection, non-string types, `0`/negative/NaN/±Infinity amounts, string-vs-number coercion, the 9-vs-10 character reason boundary, whitespace-only reasons, unknown and missing fields, and frozen-model immutability. |
+| **Protocol compliance** — correct JSON-RPC error mapping and flow | `TestProtocolCompliance` (13 tests) drives a real subprocess through initialize → initialized → tools/list → 9 tool calls and asserts the code on each reply. Plus `test_official_client_can_drive_the_server`, which runs the real SDK `ClientSession` end to end. |
+| **Business-rule correctness** — the books balance | `TestRefundArithmetic` (6 tests): a zero balance cannot be overdrawn, an exact-balance refund leaves `0.0` rather than `-0.0`, receipt/ledger/balance always agree, repeated refunds conserve the total, and a sub-cent request is refused even when schema validation is bypassed. |
+| **Validation depth** — schemas that hold up on every field | `TestValidationDepth` (61 tests): casing, length, separators, whitespace-padding, newline injection, non-string types, `0`/negative/NaN/±Infinity amounts, string-vs-number coercion, the 9-vs-10 character reason boundary, whitespace-only reasons, unknown and missing fields, and frozen-model immutability. |
 
 ```
-68 passed in 7.57s
+85 passed in 9.24s
 ```
 
 ---
 
 ## Notes and known edges
 
+- **Money is handled in whole cents.** `amount` is rejected above 2 decimal places, and the
+  balance check and the debit are both computed in integer cents. Comparing rounded floats
+  while debiting unrounded ones previously let a sub-cent request overdraw a balance; see
+  `TestRefundArithmetic`.
 - **`amount` accepts JSON integers.** `strict=True` blocks `"50"` → `50.0` and `True` → `1.0`,
   but still admits `50` for a float field. JSON has no separate integer type, so rejecting
   `{"amount": 50}` would be wrong.

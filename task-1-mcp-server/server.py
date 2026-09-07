@@ -119,7 +119,7 @@ _store_lock = asyncio.Lock()  # tools/call requests can be in flight concurrentl
 
 
 def reset_store() -> None:
-    """Restore the seed data. Used by the test suite between cases."""
+    """Restore the seed data. Used by TestRefundArithmetic between cases."""
     global _customers
     _customers = copy.deepcopy(_SEED_CUSTOMERS)
     _refund_ledger.clear()
@@ -167,22 +167,36 @@ async def trigger_refund(args: TriggerRefundInput) -> RefundReceipt:
             )
 
         balance = record["refundable_balance_usd"]
-        # Compare rounded: binary floats put 75.25 - 75.25 a hair either side of zero.
-        if round(args.amount, 2) > round(balance, 2):
+        # Everything below is in whole cents. Comparing rounded floats but debiting
+        # unrounded ones let a sub-cent request pass the check and then take more
+        # than the receipt admitted to, leaving balances at -0.0.
+        requested_cents = round(args.amount * 100)
+        balance_cents = round(balance * 100)
+
+        if requested_cents < 1:
+            # Schema validation already rejects this; caught here too so the rule
+            # holds for any caller that reaches the tool another way.
+            raise ToolExecutionError(
+                "amount_below_minimum",
+                f"Refund of {args.amount} USD rounds to nothing; the minimum is 0.01 USD.",
+                customer_id=args.customer_id,
+            )
+
+        if requested_cents > balance_cents:
             raise ToolExecutionError(
                 "refund_exceeds_balance",
                 f"Refund of {args.amount:.2f} USD exceeds the refundable balance of {balance:.2f} USD.",
                 customer_id=args.customer_id,
-                requested_usd=round(args.amount, 2),
-                refundable_balance_usd=round(balance, 2),
+                requested_usd=requested_cents / 100,
+                refundable_balance_usd=balance_cents / 100,
             )
 
-        remaining = round(balance - args.amount, 2)
+        remaining = (balance_cents - requested_cents) / 100
         record["refundable_balance_usd"] = remaining
         receipt = RefundReceipt(
             refund_id="RFND-" + uuid4().hex[:12].upper(),
             customer_id=args.customer_id,
-            amount=round(args.amount, 2),
+            amount=requested_cents / 100,
             reason=args.reason,
             status="accepted",
             remaining_refundable_usd=remaining,

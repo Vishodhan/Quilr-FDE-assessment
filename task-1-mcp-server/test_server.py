@@ -13,6 +13,7 @@ Run from this directory: ``pytest -v``
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from pydantic import ValidationError
 SERVER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SERVER_DIR))
 
+import server  # noqa: E402
 from models import GetCustomerRecordInput, TriggerRefundInput  # noqa: E402
 
 SUBPROCESS_TIMEOUT = 60
@@ -223,6 +225,17 @@ class TestValidationDepth:
         with pytest.raises(ValidationError):
             TriggerRefundInput(customer_id="CUST-10042", amount=5, reason=reason)
 
+    @pytest.mark.parametrize("amount", [10.005, 0.004, 250.001, 1.2345, 0.0001])
+    def test_rejects_sub_cent_amounts(self, amount: float) -> None:
+        """Money has two decimal places. Anything finer is a rounding error, not an amount."""
+        with pytest.raises(ValidationError):
+            TriggerRefundInput(customer_id="CUST-10042", amount=amount, reason="duplicate charge")
+
+    @pytest.mark.parametrize("amount", [10, 10.0, 10.5, 10.55, 0.01, 1_000_000.99])
+    def test_accepts_whole_cent_amounts(self, amount: float) -> None:
+        model = TriggerRefundInput(customer_id="CUST-10042", amount=amount, reason="duplicate charge")
+        assert model.amount == float(amount)
+
     def test_reason_boundary_is_exactly_ten(self) -> None:
         """Nine characters fails, ten passes - the boundary is where it is documented."""
         with pytest.raises(ValidationError):
@@ -243,6 +256,84 @@ class TestValidationDepth:
         assert schema["properties"]["amount"]["exclusiveMinimum"] == 0
         assert schema["properties"]["reason"]["minLength"] == 10
         assert set(schema["required"]) == {"customer_id", "amount", "reason"}
+
+
+@pytest.mark.asyncio
+class TestRefundArithmetic:
+    """The balance check and the debit must be the same number.
+
+    Exercised in-process rather than over the wire, because the interesting cases
+    are arithmetic rather than protocol.
+    """
+
+    @pytest.fixture(autouse=True)
+    def fresh_store(self) -> None:
+        """Every case starts from the seed balances."""
+        server.reset_store()
+
+    async def test_cannot_overdraw_a_zero_balance(self) -> None:
+        """CUST-AB123 has 0.00 refundable. Nothing may be issued against it."""
+        with pytest.raises(server.ToolExecutionError) as exc:
+            await server.trigger_refund(
+                TriggerRefundInput(customer_id="CUST-AB123", amount=0.01, reason="goodwill credit")
+            )
+        assert exc.value.code == "refund_exceeds_balance"
+        assert server._customers["CUST-AB123"]["refundable_balance_usd"] == 0.0
+
+    async def test_cannot_exceed_the_balance_by_one_cent(self) -> None:
+        with pytest.raises(server.ToolExecutionError) as exc:
+            await server.trigger_refund(
+                TriggerRefundInput(customer_id="CUST-10042", amount=250.01, reason="please refund me")
+            )
+        assert exc.value.code == "refund_exceeds_balance"
+        assert server._customers["CUST-10042"]["refundable_balance_usd"] == 250.00
+
+    async def test_exact_balance_refund_leaves_a_clean_zero(self) -> None:
+        """0.0, not -0.0: comparison and debit both happen in whole cents."""
+        receipt = await server.trigger_refund(
+            TriggerRefundInput(customer_id="CUST-20099", amount=75.25, reason="full refund issued")
+        )
+        assert receipt.remaining_refundable_usd == 0.0
+        assert math.copysign(1.0, receipt.remaining_refundable_usd) == 1.0
+        assert math.copysign(1.0, server._customers["CUST-20099"]["refundable_balance_usd"]) == 1.0
+
+    async def test_receipt_ledger_and_balance_all_agree(self) -> None:
+        receipt = await server.trigger_refund(
+            TriggerRefundInput(customer_id="CUST-10042", amount=100.25, reason="shipping never arrived")
+        )
+        assert receipt.amount == 100.25
+        assert receipt.remaining_refundable_usd == 149.75
+        assert server._customers["CUST-10042"]["refundable_balance_usd"] == 149.75
+        assert server._refund_ledger[-1]["amount"] == 100.25
+
+    async def test_a_sub_cent_request_is_refused_even_if_validation_is_bypassed(self) -> None:
+        """Defence in depth: the tool refuses it, not just the schema.
+
+        model_construct skips validation, standing in for a caller that reached the
+        business layer some other way.
+        """
+        sneaky = TriggerRefundInput.model_construct(
+            customer_id="CUST-AB123", amount=0.004, reason="sub-cent probe"
+        )
+        with pytest.raises(server.ToolExecutionError) as exc:
+            await server.trigger_refund(sneaky)
+        assert exc.value.code == "amount_below_minimum"
+        assert server._customers["CUST-AB123"]["refundable_balance_usd"] == 0.0
+
+    async def test_repeated_refunds_cannot_drive_the_balance_negative(self) -> None:
+        refunded = 0.0
+        for _ in range(20):
+            try:
+                receipt = await server.trigger_refund(
+                    TriggerRefundInput(customer_id="CUST-20099", amount=10.00, reason="incremental refund")
+                )
+            except server.ToolExecutionError:
+                break
+            refunded += receipt.amount
+
+        balance = server._customers["CUST-20099"]["refundable_balance_usd"]
+        assert balance >= 0.0
+        assert refunded + balance == 75.25  # nothing created or destroyed
 
 
 # --------------------------------------------------------------------------- #

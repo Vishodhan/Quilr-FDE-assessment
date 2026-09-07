@@ -125,3 +125,49 @@ Also moved a class-scoped fixture to module scope to clear a `PytestRemovedIn10W
 `README.md` covering the tool contracts, the five design decisions, a definition-of-done
 table mapping each criterion to the tests that prove it, and the known edges
 (int-for-float, no `-32700` for unparseable lines, `-32602` for unknown methods).
+
+## Step 9 — Fix a money bug found on review
+
+Reading back through `trigger_refund`, the balance check and the debit were not the same
+number:
+
+```python
+if round(args.amount, 2) > round(balance, 2):   # compared rounded
+    ...
+remaining = round(balance - args.amount, 2)     # debited unrounded
+```
+
+Reproduced it before changing anything. Against `CUST-AB123`, whose refundable balance is
+`0.00`:
+
+```
+refund 0.004 -> ACCEPTED amount=0.0 remaining=-0.0
+refund 0.004 -> ACCEPTED amount=0.0 remaining=-0.0
+```
+
+Three distinct faults from one cause:
+
+1. **A zero balance could be overdrawn.** `round(0.004, 2)` is `0.0`, so the guard passed.
+2. **Any balance could be overdrawn by just under half a cent** — `250.004` against
+   `250.00` was accepted.
+3. **The receipt understated the request.** It recorded `amount: 250.0` while `250.004`
+   had been debited, so the receipt, the ledger and the balance disagreed. Balances also
+   landed on `-0.0`.
+
+Wrote six failing tests first (`TestRefundArithmetic`) plus schema cases, confirmed **6
+red**, then fixed in two places:
+
+- **`models.py`** — reject an `amount` with more than 2 decimal places, so it fails at the
+  protocol boundary as `-32602`. The check reads the exponent of `Decimal(str(value))`,
+  whose shortest round-trip repr reflects what the caller sent rather than binary float
+  noise; `1.1` passes, `10.005` does not.
+- **`server.py`** — compare and debit in **whole cents**. `requested_cents > balance_cents`
+  and `remaining = (balance_cents - requested_cents) / 100` are exact, symmetric by
+  construction, and cannot produce `-0.0`. A request rounding to zero cents is refused as
+  `amount_below_minimum`, so the rule still holds for a caller that reaches the tool
+  without passing through the schema.
+
+`reset_store()` had also been dead code with a docstring claiming the test suite used it.
+`TestRefundArithmetic` now genuinely uses it as an autouse fixture, so the claim is true.
+
+**85 passed** (was 68). ruff and mypy clean.
