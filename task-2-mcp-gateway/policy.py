@@ -27,7 +27,6 @@ UNAUTHORIZED_TOOL_CALL: Final = -32001
 # Tools whose name carries this prefix are privileged.
 ADMIN_TOOL_PREFIX: Final = "admin_"
 
-METHOD_TOOLS_LIST: Final = "tools/list"
 METHOD_TOOLS_CALL: Final = "tools/call"
 
 

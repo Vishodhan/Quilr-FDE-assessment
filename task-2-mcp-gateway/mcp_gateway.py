@@ -113,6 +113,17 @@ def _error_response(
     )
 
 
+async def _stream_upstream_body(upstream: httpx.Response, correlation_id: str) -> AsyncIterator[bytes]:
+    """Pump an SSE body through chunk by chunk so events are not held back."""
+    try:
+        async for chunk in upstream.aiter_bytes():
+            yield chunk
+    except httpx.RequestError:
+        logger.warning("[%s] upstream stream aborted mid-body", correlation_id)
+    finally:
+        await upstream.aclose()
+
+
 def create_app(
     settings: Settings | None = None,
     registry: TokenRegistry | None = None,
@@ -143,45 +154,26 @@ def create_app(
 
     app = FastAPI(title="MCP Security Gateway", version="1.0.0", lifespan=lifespan)
 
-    def _request_headers(request: Request, principal: Principal, correlation_id: str) -> dict[str, str]:
-        """Copy the client's headers onward, minus the per-hop and credential ones."""
-        headers = {name: value for name, value in request.headers.items() if name.lower() not in _STRIP_FROM_REQUEST}
-        if settings.upstream_token:
-            headers["authorization"] = f"Bearer {settings.upstream_token}"
-
-        # Let the downstream server see who the gateway decided this was.
-        headers["x-mcp-gateway-role"] = principal.role.value
-        headers["x-mcp-gateway-principal"] = principal.token_id
-        headers["x-request-id"] = correlation_id
-
-        client_host = request.client.host if request.client else None
-        if client_host:
-            existing = request.headers.get("x-forwarded-for")
-            headers["x-forwarded-for"] = f"{existing}, {client_host}" if existing else client_host
-        return headers
-
-    def _response_headers(headers: httpx.Headers) -> dict[str, str]:
-        """Copy the upstream response headers back, minus the per-hop ones."""
-        return {name: value for name, value in headers.items() if name.lower() not in _STRIP_FROM_RESPONSE}
-
-    async def _relay(upstream: httpx.Response, correlation_id: str) -> AsyncIterator[bytes]:
-        """Pump an SSE body through chunk by chunk so events are not held back."""
-        try:
-            async for chunk in upstream.aiter_bytes():
-                yield chunk
-        except httpx.RequestError:
-            logger.warning("[%s] upstream stream aborted mid-body", correlation_id)
-        finally:
-            await upstream.aclose()
-
     async def _forward(
         request: Request, body: bytes, principal: Principal, rpc: JsonRpcRequest, correlation_id: str
     ) -> Response:
         """Relay the request downstream and hand the response back unchanged."""
         client: httpx.AsyncClient = app.state.http_client
-        upstream_request = client.build_request(
-            "POST", settings.upstream_url, content=body, headers=_request_headers(request, principal, correlation_id)
-        )
+
+        # Copy the client's headers onward, minus the per-hop and credential ones,
+        # then attach the gateway's own identity for the downstream server to see.
+        headers = {name: value for name, value in request.headers.items() if name.lower() not in _STRIP_FROM_REQUEST}
+        if settings.upstream_token:
+            headers["authorization"] = f"Bearer {settings.upstream_token}"
+        headers["x-mcp-gateway-role"] = principal.role.value
+        headers["x-mcp-gateway-principal"] = principal.token_id
+        headers["x-request-id"] = correlation_id
+        client_host = request.client.host if request.client else None
+        if client_host:
+            existing = request.headers.get("x-forwarded-for")
+            headers["x-forwarded-for"] = f"{existing}, {client_host}" if existing else client_host
+
+        upstream_request = client.build_request("POST", settings.upstream_url, content=body, headers=headers)
 
         try:
             upstream = await client.send(upstream_request, stream=True)
@@ -200,12 +192,15 @@ def create_app(
             )
 
         counters["forwarded"] += 1
-        response_headers = _response_headers(upstream.headers)
+        # Copy the upstream response headers back, minus the per-hop ones.
+        response_headers = {
+            name: value for name, value in upstream.headers.items() if name.lower() not in _STRIP_FROM_RESPONSE
+        }
         content_type = upstream.headers.get("content-type", "")
 
         if content_type.startswith("text/event-stream"):
             return StreamingResponse(
-                _relay(upstream, correlation_id),
+                _stream_upstream_body(upstream, correlation_id),
                 status_code=upstream.status_code,
                 headers=response_headers,
                 media_type=content_type,

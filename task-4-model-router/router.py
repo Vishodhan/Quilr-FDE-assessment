@@ -253,6 +253,11 @@ class ModelRouter:
 
         try:
             response = await self._attempt(self.primary, payload)
+        except (UpstreamRateLimited, UpstreamUnavailable, TimeoutError) as exc:
+            failure_reason = _reason_for(exc, self.timeout_seconds)
+            logger.warning("[%s] primary %s failed (%s)", request_id, self.primary.name, failure_reason)
+        else:
+            # No exception: the primary answered in time, nothing to fail over.
             return RoutingResult(
                 response=response,
                 provider=self.primary.name,
@@ -260,9 +265,6 @@ class ModelRouter:
                 failover_reason=None,
                 latency_ms=(time.perf_counter() - started) * 1000,
             )
-        except (UpstreamRateLimited, UpstreamUnavailable, TimeoutError) as exc:
-            reason = _reason_for(exc, self.timeout_seconds)
-            logger.warning("[%s] primary %s failed (%s)", request_id, self.primary.name, reason)
 
         if self.secondary is None:
             raise GatewayError(
@@ -285,12 +287,12 @@ class ModelRouter:
                 error_type="upstream_error",
             ) from exc
 
-        logger.info("[%s] served by fallback %s after %s", request_id, self.secondary.name, reason)
+        logger.info("[%s] served by fallback %s after %s", request_id, self.secondary.name, failure_reason)
         return RoutingResult(
             response=response,
             provider=self.secondary.name,
             failed_over=True,
-            failover_reason=reason,
+            failover_reason=failure_reason,
             latency_ms=(time.perf_counter() - started) * 1000,
         )
 

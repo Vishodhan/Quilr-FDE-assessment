@@ -171,7 +171,9 @@ class TokenLedger:
                     # COMMIT, not ROLLBACK: nothing was inserted, but the eviction
                     # above is real work and rolling it back would leak dead rows.
                     await self._db.execute("COMMIT")
-                    logger.info("rate limit hit for %s: %d + %d > %d", _mask(api_key), used, tokens, self.limit_tokens)
+                    # Show just enough of the key to correlate logs, never the whole thing.
+                    masked_key = f"{api_key[:4]}...{api_key[-2:]}" if len(api_key) > 8 else "***"
+                    logger.info("rate limit hit for %s: %d + %d > %d", masked_key, used, tokens, self.limit_tokens)
                     return Reservation(
                         allowed=False,
                         tokens=tokens,
@@ -264,8 +266,3 @@ class TokenLedger:
         # The request is larger than the whole budget: waiting will not help,
         # but report a full window rather than zero so clients back off.
         return self._window_ms
-
-
-def _mask(api_key: str) -> str:
-    """Show just enough of a key to correlate logs, never the whole thing."""
-    return f"{api_key[:4]}...{api_key[-2:]}" if len(api_key) > 8 else "***"

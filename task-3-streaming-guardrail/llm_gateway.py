@@ -101,18 +101,23 @@ def transform_chunk(chunk: dict[str, Any], redactor: StreamingRedactor) -> dict[
     if not isinstance(delta, dict):
         return chunk
 
-    finished = choice.get("finish_reason") is not None
-    text = delta.get("content")
+    is_finished = choice.get("finish_reason") is not None
+    original_text = delta.get("content")
+    had_content_key = original_text is not None
 
-    emitted = redactor.feed(text) if isinstance(text, str) else ""
-    if finished:
+    redacted_text = redactor.feed(original_text) if isinstance(original_text, str) else ""
+    if is_finished:
         # Last chance: nothing may stay in the buffer once the turn is over.
-        emitted += redactor.flush()
+        redacted_text += redactor.flush()
 
-    if emitted or text is not None:
-        delta["content"] = emitted
+    if had_content_key or redacted_text:
+        delta["content"] = redacted_text
 
-    if not emitted and not finished and set(delta) <= {"content"}:
+    # Drop the frame only when there is truly nothing left to say: no text was
+    # released, the turn is not over, and content was the only thing this delta
+    # carried (a role or tool_calls chunk must still go out even with no text).
+    is_content_only_delta = set(delta) <= {"content"}
+    if not redacted_text and not is_finished and is_content_only_delta:
         return None
     return chunk
 
@@ -169,8 +174,13 @@ def create_app(provider: LLMProvider | None = None, max_holdback: int = DEFAULT_
                     outgoing = transform_chunk(chunk, redactor)
                     if outgoing is None:
                         continue  # everything in this delta is still held back
-                    if first_token_at is None and _carries_content(outgoing):
-                        first_token_at = time.perf_counter()
+
+                    if first_token_at is None:
+                        # True once this delta actually delivers text, as opposed
+                        # to just a role or finish marker.
+                        outgoing_choices = outgoing.get("choices") or []
+                        if outgoing_choices and (outgoing_choices[0].get("delta") or {}).get("content"):
+                            first_token_at = time.perf_counter()
                     yield _sse(json.dumps(outgoing))
 
                 # An upstream that stopped without a finish_reason still must not
@@ -178,7 +188,16 @@ def create_app(provider: LLMProvider | None = None, max_holdback: int = DEFAULT_
                 if not saw_finish:
                     tail = redactor.flush()
                     if tail:
-                        yield _sse(json.dumps(_tail_chunk(template, tail)))
+                        # Wrap the flushed tail in a chunk shaped like the ones around it.
+                        base = template or {}
+                        tail_chunk = {
+                            "id": base.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                            "object": "chat.completion.chunk",
+                            "created": base.get("created") or int(time.time()),
+                            "model": base.get("model") or "unknown",
+                            "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": None}],
+                        }
+                        yield _sse(json.dumps(tail_chunk))
 
             except httpx.HTTPStatusError as exc:
                 logger.warning("[%s] upstream returned HTTP %s", request_id, exc.response.status_code)
@@ -257,33 +276,16 @@ def create_app(provider: LLMProvider | None = None, max_holdback: int = DEFAULT_
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
         """Liveness, the active provider, and lifetime redaction counts."""
+        provider = getattr(app.state, "provider", None)
         return {
             "status": "ok",
-            "provider": getattr(app.state, "provider", None).name if hasattr(app.state, "provider") else None,
+            "provider": provider.name if provider is not None else None,
             "replacement": REPLACEMENT,
             "max_holdback": max_holdback,
             "totals": dict(totals),
         }
 
     return app
-
-
-def _carries_content(chunk: dict[str, Any]) -> bool:
-    """True when a chunk actually delivers text, as opposed to a role or finish marker."""
-    choices = chunk.get("choices") or []
-    return bool(choices and (choices[0].get("delta") or {}).get("content"))
-
-
-def _tail_chunk(template: dict[str, Any] | None, text: str) -> dict[str, Any]:
-    """Wrap flushed tail text in a chunk shaped like the ones around it."""
-    base = template or {}
-    return {
-        "id": base.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion.chunk",
-        "created": base.get("created") or int(time.time()),
-        "model": base.get("model") or "unknown",
-        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-    }
 
 
 app = create_app()

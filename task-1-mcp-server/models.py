@@ -8,7 +8,6 @@ same models, so the contract and the enforcement can never drift apart.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
@@ -49,13 +48,8 @@ class TriggerRefundInput(BaseModel):
     @field_validator("amount")
     @classmethod
     def _reject_sub_cent_precision(cls, value: float) -> float:
-        """Money has two decimal places; 10.005 USD is a rounding error, not an amount.
-
-        Measured off ``str(value)``, whose shortest round-trip repr reflects what the
-        caller actually sent rather than binary float noise.
-        """
-        exponent = Decimal(str(value)).as_tuple().exponent
-        if isinstance(exponent, int) and exponent < -2:
+        """Money has two decimal places; 10.005 USD is a rounding error, not an amount."""
+        if round(value, 2) != value:
             raise ValueError("amount must not have more than 2 decimal places")
         return value
 

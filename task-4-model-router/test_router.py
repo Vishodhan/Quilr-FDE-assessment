@@ -531,6 +531,25 @@ class TestGatewayFailover:
 
         assert 0 < usage["used_tokens"] < 100, "the 5,000-token reservation was not refunded"
 
+    async def test_rate_limit_headers_on_a_failed_request_reflect_the_refund(self, ledger: TokenLedger) -> None:
+        """X-RateLimit-Remaining must match what /v1/usage reports right after.
+
+        The refund happens before the response is built, so its header must not
+        be computed from the pre-refund reservation.
+        """
+        router = ModelRouter(MockProvider("primary", "unavailable"), MockProvider("fallback", "unavailable"))
+        application, client = build_gateway(ledger, router)
+        async with application.router.lifespan_context(application), client:
+            response = await client.post("/v1/completions", json=body(max_tokens=5_000), headers=auth())
+            usage = (await client.get("/v1/usage", headers=auth())).json()
+
+        assert response.status_code == 503
+        header_remaining = int(response.headers["x-ratelimit-remaining"])
+        assert header_remaining == usage["remaining_tokens"], (
+            f"header said {header_remaining} remaining but the ledger already showed "
+            f"{usage['remaining_tokens']} by the time the response was sent"
+        )
+
 
 @pytest.mark.asyncio
 class TestErrorSanitisation:

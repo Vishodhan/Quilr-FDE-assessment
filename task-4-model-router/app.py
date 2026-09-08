@@ -104,6 +104,15 @@ def _error_response(error: GatewayError, request_id: str, extra_headers: dict[st
     return JSONResponse(status_code=error.status_code, content=error.to_payload(request_id), headers=headers)
 
 
+def _rate_limit_headers(limit_tokens: int, remaining_tokens: int, window_seconds: int) -> dict[str, str]:
+    """Standard rate-limit headers, so clients can pace themselves."""
+    return {
+        "X-RateLimit-Limit": str(limit_tokens),
+        "X-RateLimit-Remaining": str(remaining_tokens),
+        "X-RateLimit-Reset": str(window_seconds),
+    }
+
+
 def create_app(ledger: TokenLedger | None = None, router: ModelRouter | None = None) -> FastAPI:
     """Build the gateway. Both dependencies are injectable for testing."""
 
@@ -134,14 +143,6 @@ def create_app(ledger: TokenLedger | None = None, router: ModelRouter | None = N
                 await app.state.ledger.close()
 
     app = FastAPI(title="LLM Gateway - rate limiting & model failover", version="1.0.0", lifespan=lifespan)
-
-    def _rate_limit_headers(reservation: Reservation, window_seconds: int) -> dict[str, str]:
-        """Standard rate-limit headers, so clients can pace themselves."""
-        return {
-            "X-RateLimit-Limit": str(reservation.limit_tokens),
-            "X-RateLimit-Remaining": str(reservation.remaining_tokens),
-            "X-RateLimit-Reset": str(window_seconds),
-        }
 
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
@@ -198,12 +199,25 @@ def create_app(ledger: TokenLedger | None = None, router: ModelRouter | None = N
         except GatewayError as error:
             extra_headers: dict[str, str] = {}
             if reservation is not None:
-                extra_headers = _rate_limit_headers(reservation, ledger_.window_seconds)
                 if reservation.allowed:
-                    # Refund down to the prompt estimate: the provider did some work,
-                    # but the client got no completion. A full refund would let a
-                    # client hammer a failing provider for free.
+                    # Refund down to the prompt estimate *before* reading back the
+                    # headers below: the provider did some work, but the client got
+                    # no completion, and a full refund would let a client hammer a
+                    # failing provider for free. Reconciling first (rather than
+                    # reporting the pre-refund reservation, as an earlier version of
+                    # this handler did) keeps X-RateLimit-Remaining in sync with
+                    # what /v1/usage would report a moment later.
                     await ledger_.reconcile(reservation, prompt_estimate)
+                    fresh_usage = await ledger_.usage(api_key)
+                    extra_headers = _rate_limit_headers(
+                        fresh_usage.limit_tokens, fresh_usage.remaining_tokens, fresh_usage.window_seconds
+                    )
+                else:
+                    # Denied outright: nothing was reserved, so the reservation's own
+                    # numbers are already the current state - no re-read needed.
+                    extra_headers = _rate_limit_headers(
+                        reservation.limit_tokens, reservation.remaining_tokens, ledger_.window_seconds
+                    )
             logger.info("[%s] returning %s (%d)", request_id, error.code, error.status_code)
             return _error_response(error, request_id, extra_headers)
         except Exception:
@@ -245,9 +259,7 @@ def create_app(ledger: TokenLedger | None = None, router: ModelRouter | None = N
                 "X-Gateway-Provider": result.provider,
                 "X-Gateway-Failover": str(result.failed_over).lower(),
                 "X-Gateway-Latency-Ms": f"{result.latency_ms:.1f}",
-                "X-RateLimit-Limit": str(usage.limit_tokens),
-                "X-RateLimit-Remaining": str(usage.remaining_tokens),
-                "X-RateLimit-Reset": str(usage.window_seconds),
+                **_rate_limit_headers(usage.limit_tokens, usage.remaining_tokens, usage.window_seconds),
             },
         )
 

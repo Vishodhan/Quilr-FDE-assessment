@@ -69,17 +69,6 @@ def reserve_stdout_for_protocol() -> TextIO:
     return os.fdopen(protocol_fd, "w", encoding="utf-8", buffering=1, newline="\n")
 
 
-def configure_logging() -> None:
-    """Send every log record to stderr, at the level named by MCP_LOG_LEVEL."""
-    level = os.getenv("MCP_LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, level, logging.INFO),
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        force=True,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # in-memory backing store
 # --------------------------------------------------------------------------- #
@@ -149,7 +138,7 @@ async def get_customer_record(args: GetCustomerRecordInput) -> CustomerRecord:
     if record is None:
         raise ToolExecutionError(
             "customer_not_found",
-            "No customer exists with id " + args.customer_id + ".",
+            f"No customer exists with id {args.customer_id}.",
             customer_id=args.customer_id,
         )
     return CustomerRecord(**record)
@@ -162,7 +151,7 @@ async def trigger_refund(args: TriggerRefundInput) -> RefundReceipt:
         if record is None:
             raise ToolExecutionError(
                 "customer_not_found",
-                "No customer exists with id " + args.customer_id + ".",
+                f"No customer exists with id {args.customer_id}.",
                 customer_id=args.customer_id,
             )
 
@@ -194,7 +183,7 @@ async def trigger_refund(args: TriggerRefundInput) -> RefundReceipt:
         remaining = (balance_cents - requested_cents) / 100
         record["refundable_balance_usd"] = remaining
         receipt = RefundReceipt(
-            refund_id="RFND-" + uuid4().hex[:12].upper(),
+            refund_id=f"RFND-{uuid4().hex[:12].upper()}",
             customer_id=args.customer_id,
             amount=requested_cents / 100,
             reason=args.reason,
@@ -241,31 +230,6 @@ def _invalid_params(message: str, **data: Any) -> McpError:
     return McpError(types.ErrorData(code=types.INVALID_PARAMS, message=message, data=data or None))
 
 
-def _tool_result(model: BaseModel) -> types.ServerResult:
-    """Wrap a successful tool payload as both structured and text content."""
-    return types.ServerResult(
-        types.CallToolResult(
-            content=[types.TextContent(type="text", text=model.model_dump_json(indent=2))],
-            structuredContent=model.model_dump(mode="json"),
-            isError=False,
-        )
-    )
-
-
-def _tool_error_result(error: ToolExecutionError) -> types.ServerResult:
-    """Wrap a business failure as an errored tool result.
-
-    No structuredContent here: the error body deliberately does not match the
-    tool's declared outputSchema.
-    """
-    return types.ServerResult(
-        types.CallToolResult(
-            content=[types.TextContent(type="text", text=json.dumps(error.as_payload(), indent=2))],
-            isError=True,
-        )
-    )
-
-
 async def handle_list_tools(_request: types.ListToolsRequest) -> types.ServerResult:
     """Advertise the two tools with the JSON Schemas generated from their models."""
     logger.debug("tools/list -> %s", [tool.name for tool in TOOLS])
@@ -283,7 +247,7 @@ async def handle_call_tool(request: types.CallToolRequest) -> types.ServerResult
     entry = _TOOL_REGISTRY.get(name)
     if entry is None:
         logger.warning("tools/call for unknown tool %r", name)
-        raise _invalid_params("Unknown tool: " + repr(name), available_tools=sorted(_TOOL_REGISTRY))
+        raise _invalid_params(f"Unknown tool: {name!r}", available_tools=sorted(_TOOL_REGISTRY))
 
     model, handler = entry
     raw_arguments = request.params.arguments if request.params.arguments is not None else {}
@@ -295,7 +259,7 @@ async def handle_call_tool(request: types.CallToolRequest) -> types.ServerResult
     except ValidationError as exc:
         logger.warning("Rejected %s: %d schema violation(s)", name, exc.error_count())
         raise _invalid_params(
-            "Invalid arguments for tool " + repr(name),
+            f"Invalid arguments for tool {name!r}",
             validation_errors=format_validation_errors(exc),
         ) from exc
 
@@ -303,28 +267,33 @@ async def handle_call_tool(request: types.CallToolRequest) -> types.ServerResult
         result = await handler(arguments)
     except ToolExecutionError as exc:
         logger.info("Tool %s refused the call: %s", name, exc.code)
-        return _tool_error_result(exc)
+        # No structuredContent: the error body deliberately does not match the
+        # tool's declared outputSchema.
+        error_text = json.dumps(exc.as_payload(), indent=2)
+        return types.ServerResult(
+            types.CallToolResult(content=[types.TextContent(type="text", text=error_text)], isError=True)
+        )
     except Exception as exc:  # never let an internal traceback reach the wire
         logger.exception("Unhandled error while running tool %s", name)
         raise McpError(
-            types.ErrorData(code=types.INTERNAL_ERROR, message="Internal error while executing " + repr(name))
+            types.ErrorData(code=types.INTERNAL_ERROR, message=f"Internal error while executing {name!r}")
         ) from exc
 
-    return _tool_result(result)
-
-
-def build_server() -> Server:
-    """Wire the handlers onto a low-level MCP server instance."""
-    server: Server = Server(SERVER_NAME, version=SERVER_VERSION)
-    server.request_handlers[types.ListToolsRequest] = handle_list_tools
-    server.request_handlers[types.CallToolRequest] = handle_call_tool
-    return server
+    return types.ServerResult(
+        types.CallToolResult(
+            content=[types.TextContent(type="text", text=result.model_dump_json(indent=2))],
+            structuredContent=result.model_dump(mode="json"),
+            isError=False,
+        )
+    )
 
 
 async def serve() -> None:
-    """Run the server until the client closes stdin."""
+    """Wire the handlers onto a low-level MCP server and run it until stdin closes."""
     protocol_stdout = reserve_stdout_for_protocol()
-    server = build_server()
+    server: Server = Server(SERVER_NAME, version=SERVER_VERSION)
+    server.request_handlers[types.ListToolsRequest] = handle_list_tools
+    server.request_handlers[types.CallToolRequest] = handle_call_tool
     logger.info("%s v%s ready on stdio", SERVER_NAME, SERVER_VERSION)
     try:
         async with stdio_server(stdout=anyio.wrap_file(protocol_stdout)) as (read_stream, write_stream):
@@ -340,7 +309,13 @@ async def serve() -> None:
 
 def main() -> int:
     """Console entrypoint. Returns a process exit code."""
-    configure_logging()
+    level = os.getenv("MCP_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, level, logging.INFO),
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        force=True,
+    )
     try:
         anyio.run(serve)
     except (KeyboardInterrupt, EOFError):
