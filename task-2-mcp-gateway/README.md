@@ -155,27 +155,6 @@ Upstream exception text never reaches the client — the gateway logs
 | **Clean proxy middleware and faithful forwarding** | `TestProxyForwarding` (9 tests): `tools/list` body matches the upstream's byte for byte, ordinary and admin tool calls, `202` for notifications, header hygiene, `X-Request-Id` echo, SSE relayed as a stream, and a downstream `-32601` passed through unrewritten. |
 | **Method-level authorization with tidy error handling** | `TestAuthorizationPolicy` (18) + `TestTokenRegistry` (22) + `TestShortCircuit` (3) + `TestAuthenticationErrors` (5) + `TestMalformedRequests` (4) + `TestUpstreamFailures` (4). The central one is `test_denied_call_never_reaches_the_downstream_server`, which asserts the upstream call log stays empty. |
 
-```
-93 passed in 0.87s
-```
-
 Tests run the gateway and the mock upstream **in-process** over `httpx.ASGITransport`,
 so there are no ports to allocate and no sleeps. Upstream faults are injected with
 `httpx.MockTransport`.
-
----
-
-## Notes and known edges
-
-- **JSON-RPC batching is rejected**, not implemented. MCP removed batching in the
-  2025-06-18 revision; accepting arrays would mean splitting a batch, forwarding a subset
-  and re-merging responses by id — complexity in the exact place a security gateway should
-  stay simple. The rejection says so in its message.
-- **A denied notification** (a `tools/call` sent with no `id`) is answered with an error
-  envelope carrying `"id": null`, which JSON-RPC permits when the id cannot be determined.
-  The call is still blocked.
-- **The mock upstream authorizes nothing on purpose.** If it enforced roles too, "the
-  downstream server was never contacted" would stop being a meaningful assertion.
-- **The token registry is static.** Swapping it for JWT verification or an IdP lookup means
-  reimplementing `TokenRegistry.resolve` and nothing else — `mcp_gateway.py` only ever sees a
-  `Principal`.

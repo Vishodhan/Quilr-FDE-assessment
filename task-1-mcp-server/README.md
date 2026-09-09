@@ -118,32 +118,3 @@ enforce validation, so the published contract cannot drift from the enforcement.
 | **Protocol compliance** — correct JSON-RPC error mapping and flow | `TestProtocolCompliance` (13 tests) drives a real subprocess through initialize → initialized → tools/list → 9 tool calls and asserts the code on each reply. Plus `test_official_client_can_drive_the_server`, which runs the real SDK `ClientSession` end to end. |
 | **Business-rule correctness** — the books balance | `TestRefundArithmetic` (6 tests): a zero balance cannot be overdrawn, an exact-balance refund leaves `0.0` rather than `-0.0`, receipt/ledger/balance always agree, repeated refunds conserve the total, and a sub-cent request is refused even when schema validation is bypassed. |
 | **Validation depth** — schemas that hold up on every field | `TestValidationDepth` (61 tests): casing, length, separators, whitespace-padding, newline injection, non-string types, `0`/negative/NaN/±Infinity amounts, string-vs-number coercion, the 9-vs-10 character reason boundary, whitespace-only reasons, unknown and missing fields, and frozen-model immutability. |
-
-```
-85 passed in 9.24s
-```
-
----
-
-## Notes and known edges
-
-- **Money is handled in whole cents.** `amount` is rejected above 2 decimal places, and the
-  balance check and the debit are both computed in integer cents. Comparing rounded floats
-  while debiting unrounded ones previously let a sub-cent request overdraw a balance; see
-  `TestRefundArithmetic`.
-- **`amount` accepts JSON integers.** `strict=True` blocks `"50"` → `50.0` and `True` → `1.0`,
-  but still admits `50` for a float field. JSON has no separate integer type, so rejecting
-  `{"amount": 50}` would be wrong.
-- **`CUST-XXXXX` is read as five uppercase alphanumerics**, so both `CUST-10042` and
-  `CUST-AB123` are valid. Lowercase is rejected rather than up-cased — the task calls for
-  rejection, not silent coercion.
-- **A line that is not valid JSON gets no `-32700` reply.** The SDK's stdio transport logs
-  the parse failure and emits a `notifications/message` frame instead. There is no request
-  `id` to answer against, so this is reasonable, but it is SDK behaviour rather than ours.
-- **An unrecognised JSON-RPC *method* returns `-32602`, not `-32601`.** The SDK validates
-  the frame against its `ClientRequest` union before dispatch, and a failed union match is
-  reported as invalid params. Method-level dispatch inside `tools/call` is fully ours and
-  is covered above.
-- **Closing stdin mid-flight discards pending replies.** `Server.run()` cancels in-flight
-  handlers as soon as the transport closes. That is deliberate SDK behaviour; the test
-  harness holds stdin open until its replies arrive, exactly as a real client does.

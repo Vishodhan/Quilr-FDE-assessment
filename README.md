@@ -120,7 +120,7 @@ stays up when the primary provider does not.
 
 ## Repository layout
 
-Each task is self-contained: its own `README.md`, `IMPLEMENTATION_PLAN.md`,
+Each task is self-contained: its own `README.md`,
 `requirements.txt`, source, tests, and a `.env.example` where there is anything to
 configure.
 
@@ -132,9 +132,7 @@ task-4-model-router/        store.py   router.py       app.py           test_rou
 ```
 
 Every task's `README.md` carries a **definition-of-done table** mapping each scoring
-criterion to the specific tests that prove it, plus a "notes and known edges" section.
-Every `IMPLEMENTATION_PLAN.md` records the steps actually followed, including the
-decisions that were reconsidered and what the first test run turned up.
+criterion to the specific tests that prove it.
 
 ---
 
@@ -164,19 +162,3 @@ Servers, if you want to poke at them by hand:
 | 2 | `python task-2-mcp-gateway/mock_upstream.py` then `python task-2-mcp-gateway/mcp_gateway.py` | 9001, 9000 |
 | 3 | `python task-3-streaming-guardrail/llm_gateway.py` | 8000 |
 | 4 | `python task-4-model-router/app.py` | 8100 |
-
----
-
-## Test results
-
-```
-task-1-mcp-server             85 passed
-task-2-mcp-gateway            93 passed
-task-3-streaming-guardrail   131 passed
-task-4-model-router           67 passed
-                            ─────────────
-                             376 passed in 33.37s
-```
-
-Verified on Python 3.12.3 (Windows). `mcp` is pinned to `>=1.17,<2.0`: the 2.x line
-renames `McpError` to `MCPError` and restructures `mcp.server`.

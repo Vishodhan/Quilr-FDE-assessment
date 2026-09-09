@@ -167,30 +167,5 @@ still pays for the attempts.
 | **Accurate state eviction and token accounting** | `TestSlidingWindow` (15): the limit boundary, a genuinely sliding window, eviction that actually deletes rows, eviction on the refusal path, per-key isolation, and a `Retry-After` that is verified by waiting exactly that long. `TestTokenAccounting` (4) + `TestTokenEstimation` (5) cover reconciliation up and down and refunds. `TestPersistence` (3) reopens the file and finds the usage still there. |
 | **Graceful fallback and error sanitisation** | `TestFailover` (6) + `TestGatewayFailover` (3): 429, outage, both-down, and no-fallback-configured. `TestErrorSanitisation` (4) + `TestErrorContract` (3): a planted `sk-live-9f2c-INTERNAL` and `10.0.0.5` appear nowhere in any response, an internal exception becomes a clean 500 with the reservation refunded, and every error carries the same four keys with a `request_id` matching the response header. |
 
-```
-67 passed in 11.77s
-```
-
 Time-dependent behaviour is tested with an **explicit clock** (`reserve(..., at_ms=...)`)
 rather than `sleep`, so window-expiry tests are exact and instant.
-
----
-
-## Notes and known edges
-
-- **The estimator is offline on purpose.** Four characters per token, no tiktoken.
-  tiktoken downloads its encoding file on first use, which would make the gateway fail on
-  an air-gapped host and the tests fail without a network. Since `reconcile()` corrects
-  the number against the provider's own `usage` moments later, a more precise estimate
-  buys very little.
-- **In-flight reservations are optimistic.** A request in progress holds its *estimate*,
-  so bursty traffic is throttled slightly early. That is the safe direction to be wrong in.
-- **The tenant allowlist is optional.** With `GATEWAY_API_KEYS` unset, any non-empty bearer
-  is treated as its own tenant, which is convenient for a demo. `_authenticate` in
-  [app.py](app.py) is the single place real authentication would go.
-- **SQLite is the right size for one node, and the limit of this design.** WAL plus
-  `BEGIN IMMEDIATE` makes it correct across processes on one machine; a multi-node
-  deployment would want Redis behind the same `TokenLedger` interface, which is why the
-  ledger has no knowledge of HTTP.
-- **`gateway.db` is created in the working directory** when you run `python app.py`. Point
-  `RATE_LIMIT_DB` somewhere else if that is inconvenient.

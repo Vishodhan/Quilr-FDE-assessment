@@ -147,31 +147,6 @@ mid-stream.
 | **Performant matching over partial text** | `TestChunkBoundaries` (63): for every sample, the sentence is split at **every index in turn** and none may leak; plus fixed chunk sizes 1–16 and a one-character-at-a-time torture test. `TestFalsePositives` (15) checks years, prices, versions, phone numbers, order ids, timestamps, URLs and never-issued SSN ranges survive untouched. |
 | **Memory efficiency and low-latency proxying** | `TestLatency` (3): the ASGI app is driven directly and each `http.response.body` message timestamped — the first byte arrives in under half the total stream time, gaps between messages stay under 200 ms, and clean prose is released with zero holdback. |
 
-```
-131 passed in 9.45s
-```
-
 The latency tests bypass `httpx.ASGITransport` on purpose: it collects every body message
 into a list before returning a response, so it cannot show *when* bytes were produced. The
 raw-ASGI harness timestamps each `http.response.body` as the gateway emits it.
-
----
-
-## Notes and known edges
-
-- **A single match longer than `max_holdback` (256 chars) split across chunks could leak
-  its prefix.** That is the deliberate memory/safety trade: the cap is what keeps the
-  buffer from growing with the response. 256 is comfortably above the longest realistic
-  email; raise it via `create_app(max_holdback=...)` if your threat model needs it.
-- **`httpx.ASGITransport` buffers**, so the functional tests use it happily but the timing
-  tests do not. Under uvicorn the response streams for real.
-- **`spec_version` matters when driving ASGI by hand.** At `2.3` Starlette runs a
-  disconnect listener alongside the stream; a harness that answers `receive()` with
-  `http.disconnect` cancels the response after one frame. The test harness advertises
-  `2.4`, which is what uvicorn sends.
-- **Scope is emails, SSNs and card numbers**, as specified. Phone numbers, API keys and
-  addresses would each be another entry in `_PATTERN_SOURCES` plus a matching tail
-  pattern if their charset differs from the two already covered.
-- **Only `delta.content` is inspected.** Tool-call arguments streamed in
-  `delta.tool_calls` are passed through untouched — worth extending for a production
-  deployment, out of scope here.
